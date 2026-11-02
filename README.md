@@ -56,6 +56,18 @@ scripts/setup_cloud.sh r2     # originals in Cloudflare R2
 Re-running is safe. The GCS mode needs `gcloud auth login` and billing on the `bottomless-512607` project. After
 switching modes, rebuild the app only if the API URL changed (it does not).
 
+What it actually costs (Google Cloud billing, October 2026; Cloudflare and GitHub Actions stay on their free tiers):
+
+| | Cost | Why |
+|---|---|---|
+| Importing a library, once | ~$1 per 10,000 files | Archive charges $0.50 per 10,000 uploads plus $0.50 per 10,000 reads, and the Worker checks each upload once. 27,000 files (photos plus Live Photo clips) cost $2.72. |
+| Keeping it, per year | ~$0.15 per 10 GB | $0.0012 per GB-month. 46 GB is about $0.66 a year. |
+| New photos, per year | ~$0.10 per 1,000 | The same upload and check, about $0.0001 per photo. |
+| Getting originals back | $0.05 per GB, plus egress | Thumbnails, previews and People come from R2 and never touch Archive. |
+
+So the 22,000-photo library cost $2.75 to bring in and costs about $1 a year after that. Files deleted within 365 days
+of upload are billed for the rest of the year, which comes to cents.
+
 ## Bring in Google Photos
 
 Export the account at takeout.google.com (Deselect all → Google Photos → 2 GB zips), download the parts, then:
