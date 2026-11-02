@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bottomless-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-01",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    // database_id is filled in by scripts/setup_cloud.sh (`wrangler d1 create`); local dev ignores it.
+    { "binding": "DB", "database_name": "bottomless-catalog", "database_id": "9565d908-8375-4483-b1ef-3133a204e786", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "DERIVED", "bucket_name": "bottomless-derived" },
+    // Only used when ORIGINALS_MODE is "r2" (local tests / fallback). Empty buckets cost nothing.
+    { "binding": "ORIGINALS_R2", "bucket_name": "bottomless-originals" }
+  ],
+  "vars": {
+    // "s3": originals in an S3-compatible bucket via presigned URLs (Google Cloud Storage in production)
+    // "r2": originals in the ORIGINALS_R2 bucket, streamed through the Worker
+    "ORIGINALS_MODE": "s3",
+    "ORIG_ENDPOINT": "https://storage.googleapis.com",
+    "ORIG_BUCKET": "",
+    "ORIG_REGION": "auto",
+    "TRASH_DAYS": "30"
+  },
+  // Secrets (wrangler secret put): APP_TOKEN, ORIG_ACCESS_KEY_ID, ORIG_SECRET_ACCESS_KEY
+  "triggers": { "crons": ["17 9 * * *"] }
+}

@@ -1,0 +1,8 @@
+// Build settings for the app. Server address and token come from Secrets.xcconfig, which scripts/setup_cloud.sh writes
+// (it is not committed). Your Apple team id goes in BOTTOMLESS_TEAM_ID there too (free Personal Team works).
+BOTTOMLESS_BUNDLE_ID = com.shaunakkapur.bottomless
+BOTTOMLESS_API_BASE = http:/$()/127.0.0.1:8787
+BOTTOMLESS_TOKEN =
+BOTTOMLESS_TEAM_ID =
+
+#include? "Secrets.xcconfig"

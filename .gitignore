@@ -1,0 +1,13 @@
+.secrets/
+node_modules/
+.wrangler/
+*.xcconfig.local
+ios/build/
+ios/*.xcodeproj/xcuserdata/
+DerivedData/
+.venv*/
+.DS_Store
+ios/Config/Secrets.xcconfig
+ios/Bottomless.xcodeproj/
+.import/
+.build/
