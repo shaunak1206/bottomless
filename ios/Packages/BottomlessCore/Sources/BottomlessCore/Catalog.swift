@@ -88,6 +88,10 @@ public final class Catalog: @unchecked Sendable {
             CREATE TABLE IF NOT EXISTS album_sent (album_id TEXT NOT NULL, asset_id TEXT NOT NULL,
               PRIMARY KEY (album_id, asset_id)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS album_sent_title (album_id TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, name TEXT, hidden INTEGER NOT NULL DEFAULT 0, ord INTEGER NOT NULL,
+              cover_face TEXT, cover_asset TEXT, cx REAL, cy REAL, cw REAL, ch REAL);
+            CREATE TABLE IF NOT EXISTS person_items (person_id TEXT NOT NULL, asset_id TEXT NOT NULL, ord INTEGER NOT NULL,
+              PRIMARY KEY (person_id, asset_id)) WITHOUT ROWID;
             """)
     }
 
@@ -277,6 +281,75 @@ public final class Catalog: @unchecked Sendable {
             \(assetSelect) JOIN album_items i ON i.asset_id = a.id
             WHERE i.album_id = ? AND a.status = 'ready' ORDER BY a.taken_at DESC
             """, [.text(albumId)])) ?? []).map(asset(from:))
+    }
+
+    // MARK: people
+
+    /// Someone in People: their name (nil until named), how many of their photos are in the library, and the face to show.
+    public struct PersonSummary: Sendable, Equatable, Identifiable, Hashable {
+        public var id: String
+        public var name: String?
+        public var hidden: Bool
+        public var count: Int
+        public var cover: FaceBox?
+    }
+
+    /// The people list version from the server (sent back so an unchanged list is not downloaded again).
+    public var peopleVersion: Int64? { value("people_version").flatMap { Int64($0) } }
+
+    /// The people as the server has them (replaces what was here).
+    public func replacePeople(_ people: [RemotePerson], version: Int64) throws {
+        try db.transaction {
+            try db.execute("DELETE FROM person_items")
+            try db.execute("DELETE FROM people")
+            for (n, p) in people.enumerated() {
+                let c = p.cover
+                try db.execute("""
+                    INSERT INTO people (id, name, hidden, ord, cover_face, cover_asset, cx, cy, cw, ch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [.text(p.id), p.name.map(SQLValue.text) ?? .null, .int(p.hidden ? 1 : 0), .int(Int64(n)),
+                          c.map { .text($0.faceId) } ?? .null, c.map { .text($0.assetId) } ?? .null,
+                          c.map { .double($0.x) } ?? .null, c.map { .double($0.y) } ?? .null,
+                          c.map { .double($0.w) } ?? .null, c.map { .double($0.h) } ?? .null])
+                for (i, asset) in p.assetIds.enumerated() {
+                    try db.execute("INSERT OR IGNORE INTO person_items (person_id, asset_id, ord) VALUES (?, ?, ?)", [.text(p.id), .text(asset), .int(Int64(i))])
+                }
+            }
+            try setValue(String(version), for: "people_version")
+        }
+    }
+
+    /// People with at least `minCount` photos in the library (named people with any), named people first, then by how
+    /// many photos they are in.
+    public func peopleSummaries(minCount: Int = 3, includeHidden: Bool = false) -> [PersonSummary] {
+        ((try? db.query("""
+            SELECT p.id, p.name, p.hidden, p.cover_face, p.cover_asset, p.cx, p.cy, p.cw, p.ch,
+              (SELECT COUNT(*) FROM person_items i JOIN assets a ON a.id = i.asset_id WHERE i.person_id = p.id AND a.status = 'ready') AS n
+            FROM people p \(includeHidden ? "" : "WHERE p.hidden = 0") ORDER BY p.ord
+            """)) ?? []).compactMap { r in
+            let n = Int(r.int("n") ?? 0)
+            guard let id = r.string("id"), n >= (r.string("name") == nil ? minCount : 1) else { return nil }
+            var cover: FaceBox?
+            if let f = r.string("cover_face"), let a = r.string("cover_asset"), let x = r.double("cx"), let y = r.double("cy"),
+               let w = r.double("cw"), let h = r.double("ch") {
+                cover = FaceBox(faceId: f, assetId: a, x: x, y: y, w: w, h: h)
+            }
+            return PersonSummary(id: id, name: r.string("name"), hidden: r.bool("hidden"), count: n, cover: cover)
+        }
+        .sorted { ($0.name == nil ? 1 : 0, -$0.count) < ($1.name == nil ? 1 : 0, -$1.count) }
+    }
+
+    public func personAssets(_ personId: String) -> [CatalogAsset] {
+        ((try? db.query("""
+            \(assetSelect) JOIN person_items i ON i.asset_id = a.id
+            WHERE i.person_id = ? AND a.status = 'ready' ORDER BY a.taken_at DESC
+            """, [.text(personId)])) ?? []).map(asset(from:))
+    }
+
+    /// The people in one photo (for the viewer's info panel).
+    public func people(inAsset assetId: String) -> [(id: String, name: String?)] {
+        ((try? db.query("""
+            SELECT p.id, p.name FROM person_items i JOIN people p ON p.id = i.person_id WHERE i.asset_id = ? AND p.hidden = 0 ORDER BY p.ord
+            """, [.text(assetId)])) ?? []).compactMap { r in r.string("id").map { ($0, r.string("name")) } }
     }
 
     /// The cloud asset for a photo on this phone, once it is backed up.

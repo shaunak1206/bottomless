@@ -11,3 +11,5 @@ ios/Config/Secrets.xcconfig
 ios/Bottomless.xcodeproj/
 .import/
 .build/
+.faces/
+__pycache__/

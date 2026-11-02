@@ -299,4 +299,25 @@ final class BottomlessUITests: XCTestCase {
         sleep(4)
         snap("21-places")
     }
+
+    func test8_PeopleNamedAndOpened() throws {
+        app.launch()
+        tab("Collections").tap()
+        let person = app.buttons["person-sim-p1"]
+        XCTAssertTrue(person.waitForExistence(timeout: 30) || scrollTo(person), "people from the face indexer are listed")
+        snap("22-people")
+        person.tap()
+        XCTAssertTrue(cells.firstMatch.waitForExistence(timeout: 10), "their photos are shown")
+        XCTAssertEqual(cells.count, 4)
+        app.buttons["person-menu"].tap()
+        app.buttons["Add Name"].tap()
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Manas")
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.navigationBars["Manas"].waitForExistence(timeout: 15), "the name sticks")
+        snap("23-person-named")
+        goBack()
+        XCTAssertTrue(app.staticTexts["Manas"].waitForExistence(timeout: 10), "the People row shows the name")
+    }
 }

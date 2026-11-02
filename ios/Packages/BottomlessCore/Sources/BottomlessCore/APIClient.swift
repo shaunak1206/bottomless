@@ -166,6 +166,37 @@ public final class APIClient: @unchecked Sendable {
         _ = try await send(request("v1/albums/\(id)", method: "DELETE"))
     }
 
+    /// The people the face indexer found. Pass the version from last time to skip the download when nothing changed.
+    public func people(since: Int64?) async throws -> PeoplePage {
+        try await json(request("v1/people", query: since.map { [URLQueryItem(name: "since", value: String($0))] } ?? []))
+    }
+
+    /// Names a person (an empty name clears it).
+    public func renamePerson(id: String, name: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["name": name])
+        _ = try await send(request("v1/people/\(id)", method: "PATCH", body: body))
+    }
+
+    public func setPersonHidden(id: String, hidden: Bool) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["hidden": hidden])
+        _ = try await send(request("v1/people/\(id)", method: "PATCH", body: body))
+    }
+
+    /// The `from` people are the same person as `id`: their photos move to it and they go away.
+    public func mergePeople(into id: String, from: [String]) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["from": from])
+        _ = try await send(request("v1/people/\(id)/merge", method: "POST", body: body))
+    }
+
+    /// "Not this person": takes these photos out of the person (the indexer will not put them back). With `to`, they
+    /// go to that person instead; a new id makes a new person, called `name`.
+    public func removeFromPerson(id: String, assetIds: [String], to: String? = nil, name: String? = nil) async throws {
+        var obj: [String: Any] = ["assetIds": assetIds]
+        if let to { obj["to"] = to }
+        if let name { obj["name"] = name }
+        _ = try await send(request("v1/people/\(id)/remove", method: "POST", body: try JSONSerialization.data(withJSONObject: obj)))
+    }
+
     public func trash(_ id: String) async throws -> RemoteAsset {
         try await json(request("v1/assets/\(id)", method: "DELETE"), as: AssetEnvelope.self).asset
     }

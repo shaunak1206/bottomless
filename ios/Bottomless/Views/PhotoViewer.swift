@@ -428,6 +428,10 @@ struct ZoomableImage: View {
 
 private struct InfoSheet: View {
     let asset: CatalogAsset
+    @Environment(AppModel.self) private var model
+    @State private var people: [Catalog.PersonSummary] = []
+    @State private var reassigning: String?
+
     var body: some View {
         NavigationStack {
             List {
@@ -460,8 +464,55 @@ private struct InfoSheet: View {
                     if let d = asset.duration { LabeledContent("Length", value: Duration.seconds(d).formatted(.time(pattern: .minuteSecond))) }
                     LabeledContent("On this iPhone", value: asset.localId == nil ? "No, in the cloud" : "Yes")
                 }
+                if !people.isEmpty {
+                    Section("People") {
+                        ForEach(people) { p in
+                            HStack(spacing: 12) {
+                                FaceAvatar(box: p.cover, size: 36)
+                                Text(p.name ?? "Unnamed")
+                                Spacer()
+                                Menu {
+                                    Button { reassigning = p.id } label: {
+                                        Label("This Is Someone Else…", systemImage: "person.crop.circle.badge.questionmark")
+                                    }
+                                    Button(role: .destructive) { notThisPerson(p.id) } label: {
+                                        Label("Not \(p.name ?? "This Person")", systemImage: "person.crop.circle.badge.xmark")
+                                    }
+                                } label: { Image(systemName: "ellipsis.circle").foregroundStyle(.secondary) }
+                            }
+                        }
+                    }
+                }
             }
             .navigationTitle("Info").navigationBarTitleDisplayMode(.inline)
+            .task(id: model.people) { loadPeople() }
+            .sheet(isPresented: Binding(get: { reassigning != nil }, set: { if !$0 { reassigning = nil } })) {
+                if let from = reassigning {
+                    PersonPickerSheet(excluding: from) { to, name in notThisPerson(from, movingTo: to, name: name) }
+                }
+            }
+        }
+    }
+
+    /// The People row's people who are in this photo (small groups that are not in People yet are left out).
+    private func loadPeople() {
+        let ids = Set(model.services?.catalog.people(inAsset: asset.id).map(\.id) ?? [])
+        people = model.people.filter { ids.contains($0.id) }
+    }
+
+    /// The face indexer put this photo in the wrong person: take it out (and keep it out), or move it to the right one.
+    private func notThisPerson(_ personId: String, movingTo to: String? = nil, name: String? = nil) {
+        guard let s = model.services else { return }
+        let assetId = asset.id
+        people.removeAll { $0.id == personId }
+        Task {
+            do {
+                try await s.api.removeFromPerson(id: personId, assetIds: [assetId], to: to, name: name)
+                try await s.sync.pullPeople()
+            } catch {
+                model.message = "Could not save that change: \(error)"
+            }
+            model.reload()
         }
     }
 }

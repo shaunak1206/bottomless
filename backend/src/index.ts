@@ -209,6 +209,179 @@ async function deleteAlbum(env: Env, id: string): Promise<Response> {
   return json({ ok: true });
 }
 
+// MARK: people
+
+const PERSON_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const FACE_ID = /^[A-Za-z0-9_-]{1,80}$/;
+
+interface FaceRow { id: string; asset_id: string; person_id: string | null; x: number; y: number; w: number; h: number; score: number }
+
+function bumpPeople(env: Env, now = Date.now()): D1PreparedStatement {
+  return env.DB.prepare(`INSERT INTO people_meta (key, value) VALUES ('version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = MAX(people_meta.value + 1, excluded.value)`).bind(now);
+}
+
+async function peopleVersion(env: Env): Promise<number> {
+  return (await env.DB.prepare("SELECT value FROM people_meta WHERE key = 'version'").first<{ value: number }>())?.value ?? 0;
+}
+
+/** Every person with the photos they are in (newest first) and the face to show for them. `?since=` skips the
+ * download when nothing changed. */
+async function listPeople(env: Env, url: URL): Promise<Response> {
+  const version = await peopleVersion(env);
+  const since = Number(url.searchParams.get('since') ?? -1);
+  if (since === version) return json({ version, unchanged: true });
+  const { results: people } = await env.DB.prepare('SELECT id, name, hidden, cover_face FROM people')
+    .all<{ id: string; name: string | null; hidden: number; cover_face: string | null }>();
+  const { results: faces } = await env.DB.prepare(`SELECT f.id, f.asset_id, f.person_id, f.x, f.y, f.w, f.h, f.score FROM faces f
+      JOIN assets a ON a.id = f.asset_id WHERE f.person_id IS NOT NULL AND a.status = 'ready' ORDER BY a.taken_at DESC`).all<FaceRow>();
+  const byPerson = new Map<string, FaceRow[]>();
+  for (const f of faces) (byPerson.get(f.person_id!) ?? byPerson.set(f.person_id!, []).get(f.person_id!)!).push(f);
+  const out = [];
+  for (const p of people) {
+    const fs = byPerson.get(p.id);
+    if (!fs?.length) continue;
+    // The chosen face, else the clearest big face: confident detections of large faces make the best pictures.
+    const cover = fs.find((f) => f.id === p.cover_face) ?? fs.reduce((b, f) => (f.w * f.h * f.score > b.w * b.h * b.score ? f : b));
+    out.push({
+      id: p.id, name: p.name, hidden: !!p.hidden,
+      cover: { faceId: cover.id, assetId: cover.asset_id, x: cover.x, y: cover.y, w: cover.w, h: cover.h },
+      assetIds: [...new Set(fs.map((f) => f.asset_id))],
+    });
+  }
+  out.sort((a, b) => Number(!a.name) - Number(!b.name) || b.assetIds.length - a.assetIds.length);
+  return json({ version, people: out });
+}
+
+/** Names, hides or picks the picture of a person. */
+async function patchPerson(req: Request, env: Env, id: string): Promise<Response> {
+  const b = await body<{ name?: string | null; hidden?: boolean; coverFace?: string }>(req);
+  const p = await env.DB.prepare('SELECT id FROM people WHERE id = ?').bind(id).first();
+  if (!p) throw new HttpError(404, 'person not found');
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  if ('name' in b) { sets.push('name = ?'); binds.push(typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 120) : null); }
+  if (typeof b.hidden === 'boolean') { sets.push('hidden = ?'); binds.push(b.hidden ? 1 : 0); }
+  if (typeof b.coverFace === 'string') {
+    if (!(await env.DB.prepare('SELECT 1 FROM faces WHERE id = ? AND person_id = ?').bind(b.coverFace, id).first())) {
+      throw new HttpError(400, 'that face is not this person');
+    }
+    sets.push('cover_face = ?'); binds.push(b.coverFace);
+  }
+  if (!sets.length) throw new HttpError(400, 'nothing to change');
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE people SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`).bind(...binds, now, id),
+    bumpPeople(env, now),
+  ]);
+  return json({ ok: true });
+}
+
+/** Moves every face of the `from` people into this one (they are the same person) and removes them. */
+async function mergePeople(req: Request, env: Env, id: string): Promise<Response> {
+  const b = await body<{ from?: string[] }>(req);
+  const from = (Array.isArray(b.from) ? b.from : []).filter((x) => typeof x === 'string' && PERSON_ID.test(x) && x !== id).slice(0, 50);
+  if (!from.length) throw new HttpError(400, 'from is required');
+  const target = await env.DB.prepare('SELECT name FROM people WHERE id = ?').bind(id).first<{ name: string | null }>();
+  if (!target) throw new HttpError(404, 'person not found');
+  const marks = from.map(() => '?').join(',');
+  const now = Date.now();
+  // Keep a name: the target's own, else the first merged person's.
+  const name = target.name ?? (await env.DB.prepare(`SELECT name FROM people WHERE id IN (${marks}) AND name IS NOT NULL LIMIT 1`)
+    .bind(...from).first<{ name: string }>())?.name ?? null;
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE faces SET person_id = ? WHERE person_id IN (${marks})`).bind(id, ...from),
+    env.DB.prepare(`UPDATE faces SET rejected = ? WHERE rejected IN (${marks})`).bind(id, ...from),
+    env.DB.prepare(`DELETE FROM people WHERE id IN (${marks})`).bind(...from),
+    env.DB.prepare('UPDATE people SET name = ?, updated_at = ? WHERE id = ?').bind(name, now, id),
+    bumpPeople(env, now),
+  ]);
+  return json({ ok: true, merged: from.length });
+}
+
+/** "Not this person": takes the person's face out of these photos; the indexer will not put it back. With `to`, the
+ * face goes to that person instead (made, with `name`, when it is new). */
+async function removeFromPerson(req: Request, env: Env, id: string): Promise<Response> {
+  const b = await body<{ assetIds?: string[]; to?: string; name?: string }>(req);
+  const ids = (Array.isArray(b.assetIds) ? b.assetIds : []).filter((x) => typeof x === 'string').slice(0, 500);
+  if (!ids.length) throw new HttpError(400, 'assetIds is required');
+  if (b.to !== undefined && (typeof b.to !== 'string' || !PERSON_ID.test(b.to) || b.to === id)) throw new HttpError(400, 'bad to');
+  const to = b.to ?? null;
+  const name = typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 120) : null;
+  const now = Date.now();
+  const stmts = to ? [env.DB.prepare(`INSERT INTO people (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name = COALESCE(people.name, excluded.name), hidden = 0, updated_at = excluded.updated_at`)
+    .bind(to, name, now, now)] : [];
+  for (const a of ids) {
+    stmts.push(env.DB.prepare('UPDATE faces SET person_id = ?, rejected = ? WHERE person_id = ? AND asset_id = ?').bind(to, id, id, a));
+  }
+  stmts.push(env.DB.prepare('UPDATE people SET cover_face = NULL WHERE id = ? AND cover_face NOT IN (SELECT id FROM faces WHERE person_id = ?)').bind(id, id));
+  stmts.push(bumpPeople(env, now));
+  await env.DB.batch(stmts);
+  return json({ ok: true });
+}
+
+/** For the Mac indexer: every face the server knows and who it belongs to now (people move when the phone merges or
+ * corrects them), in id order. */
+async function listFaces(env: Env, url: URL): Promise<Response> {
+  const after = url.searchParams.get('after') ?? '';
+  const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get('limit') ?? 1000) || 1000));
+  const { results } = await env.DB.prepare('SELECT id, asset_id, person_id, rejected FROM faces WHERE id > ? ORDER BY id LIMIT ?')
+    .bind(after, limit).all<{ id: string; asset_id: string; person_id: string | null; rejected: string | null }>();
+  return json({
+    faces: results.map((f) => ({ id: f.id, assetId: f.asset_id, personId: f.person_id, rejected: f.rejected })),
+    next: results.length === limit ? results[results.length - 1].id : null,
+  });
+}
+
+/** For the Mac indexer: adds faces (or moves them to a person) and creates the people they name. */
+async function putFaces(req: Request, env: Env): Promise<Response> {
+  const b = await body<{ faces?: Array<{ id: string; assetId: string; personId?: string | null; x: number; y: number; w: number; h: number; score: number }> }>(req);
+  const faces = Array.isArray(b.faces) ? b.faces : [];
+  if (faces.length > 400) throw new HttpError(400, 'at most 400 faces per request');
+  const frac = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= -0.5 && v <= 1.5;
+  for (const f of faces) {
+    if (!FACE_ID.test(f.id ?? '') || !/^[0-9a-f-]{36}$/.test(f.assetId ?? '') || !frac(f.x) || !frac(f.y) || !frac(f.w) || !frac(f.h)
+        || typeof f.score !== 'number' || (f.personId != null && !PERSON_ID.test(f.personId))) {
+      throw new HttpError(400, `bad face ${String(f.id)}`);
+    }
+  }
+  const now = Date.now();
+  const people = [...new Set(faces.map((f) => f.personId).filter((p): p is string => !!p))];
+  const stmts = people.map((p) => env.DB.prepare('INSERT INTO people (id, created_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING')
+    .bind(p, now, now));
+  for (const f of faces) {
+    stmts.push(env.DB.prepare(`INSERT INTO faces (id, asset_id, person_id, x, y, w, h, score) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET person_id = excluded.person_id
+        WHERE faces.rejected IS NULL OR excluded.person_id IS NULL OR faces.rejected != excluded.person_id`)
+      .bind(f.id, f.assetId, f.personId ?? null, f.x, f.y, f.w, f.h, f.score));
+  }
+  stmts.push(bumpPeople(env, now));
+  await env.DB.batch(stmts);
+  return json({ ok: true, faces: faces.length, people: people.length });
+}
+
+const FACE_STATE_KEY = 'faces/index.sqlite';
+const MAX_FACE_STATE = 95 * 1024 * 1024;
+
+/** The face indexer's working file (embeddings and what it has looked at), kept here so it can run anywhere: a GitHub
+ * Actions runner downloads it, adds what is new and puts it back. */
+async function faceIndexState(req: Request, env: Env): Promise<Response> {
+  if (req.method === 'GET') {
+    const o = await env.DERIVED.get(FACE_STATE_KEY);
+    if (!o) throw new HttpError(404, 'no face index yet');
+    return new Response(o.body, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(o.size) } });
+  }
+  if (req.method === 'PUT') {
+    const len = Number(req.headers.get('Content-Length') ?? 0);
+    if (!req.body || !len) throw new HttpError(411, 'Content-Length is required');
+    if (len > MAX_FACE_STATE) throw new HttpError(413, 'face index is too big');
+    await env.DERIVED.put(FACE_STATE_KEY, req.body);
+    return json({ ok: true, bytes: len });
+  }
+  throw new HttpError(405, 'method not allowed');
+}
+
 async function changes(env: Env, url: URL): Promise<Response> {
   const since = Math.max(0, Number(url.searchParams.get('since') ?? 0) || 0);
   const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit') ?? 500) || 500));
@@ -389,6 +562,19 @@ async function route(req: Request, env: Env): Promise<Response> {
   const am = path.match(/^\/v1\/albums\/([^/]+)$/);
   if (am && m === 'PUT') return putAlbum(req, env, decodeURIComponent(am[1]));
   if (am && m === 'DELETE') return deleteAlbum(env, decodeURIComponent(am[1]));
+  if (path === '/v1/faces/state') return faceIndexState(req, env);
+  if (path === '/v1/people' && m === 'GET') return listPeople(env, url);
+  if (path === '/v1/faces' && m === 'GET') return listFaces(env, url);
+  if (path === '/v1/faces' && m === 'POST') return putFaces(req, env);
+  const pm = path.match(/^\/v1\/people\/([^/]+)(?:\/(merge|remove))?$/);
+  if (pm) {
+    const pid = decodeURIComponent(pm[1]);
+    if (!PERSON_ID.test(pid)) throw new HttpError(400, 'bad person id');
+    if (!pm[2] && m === 'PATCH') return patchPerson(req, env, pid);
+    if (pm[2] === 'merge' && m === 'POST') return mergePeople(req, env, pid);
+    if (pm[2] === 'remove' && m === 'POST') return removeFromPerson(req, env, pid);
+    throw new HttpError(405, 'method not allowed');
+  }
   if (path === '/v1/shares' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT * FROM shares WHERE expires_at >= ? ORDER BY created_at DESC').bind(Date.now()).all<ShareRow>();
     return json({ shares: results.map((s) => ({ token: s.token, url: `${origin}/s/${s.token}`, title: s.title,

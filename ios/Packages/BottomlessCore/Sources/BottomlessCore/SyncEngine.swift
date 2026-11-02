@@ -118,6 +118,13 @@ public final class SyncEngine: @unchecked Sendable {
         try catalog.replaceAlbums(try await api.albums().albums)
     }
 
+    /// People found by the Mac's face indexer. The list is only downloaded when something changed.
+    public func pullPeople() async throws {
+        let page = try await api.people(since: catalog.peopleVersion)
+        guard page.unchanged != true, let people = page.people else { return }
+        try catalog.replacePeople(people, version: page.version)
+    }
+
     /// Mirrors this phone's albums into the cloud. Only what changed since the last sync is sent. A photo that has left
     /// the phone (freed up) stays in its cloud album; one removed from an album on the phone is removed there too.
     /// Albums deleted on the phone are deleted in the cloud only when `phoneAlbumsComplete` (full Photos access).

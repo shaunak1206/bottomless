@@ -203,6 +203,71 @@ for (const [mode, port, motoPort] of [['s3', 8799, 5055], ['r2', 8798, 0]] as co
       assert.equal((await jsonApi('/v1/albums')).body.albums.some((x: any) => x.id === 'iphone-trip'), false);
     });
 
+    test('people: indexer faces, naming, merging, "not this person", only photos in the library', async () => {
+      const a = await backup(fakeFile(62_000));
+      const b = await backup(fakeFile(63_000));
+      const c = await backup(fakeFile(64_000));
+      const face = (id: string, assetId: string, personId: string | null, w = 0.2) => ({ id, assetId, personId, x: 0.1, y: 0.1, w, h: w, score: 0.9 });
+      const put = await jsonApi('/v1/faces', { method: 'POST', body: JSON.stringify({ faces: [
+        face(`fa-${mode}`, a.id, `p1-${mode}`, 0.3), face(`fb-${mode}`, b.id, `p1-${mode}`), face(`fc-${mode}`, c.id, `p2-${mode}`),
+        face(`fa2-${mode}`, a.id, null),
+      ] }) });
+      assert.equal(put.status, 200, JSON.stringify(put.body));
+      let list = (await jsonApi('/v1/people')).body;
+      const p1 = () => list.people.find((p: any) => p.id === `p1-${mode}`);
+      assert.deepEqual(new Set(p1().assetIds), new Set([a.id, b.id]));
+      assert.equal(p1().cover.faceId, `fa-${mode}`, 'the biggest clear face is the picture');
+      assert.equal(p1().name, null);
+      assert.deepEqual((await jsonApi(`/v1/people?since=${list.version}`)).body, { version: list.version, unchanged: true });
+
+      assert.equal((await jsonApi(`/v1/people/p2-${mode}`, { method: 'PATCH', body: JSON.stringify({ name: ' Manas ' }) })).status, 200);
+      list = (await jsonApi('/v1/people')).body;
+      assert.equal(list.people.find((p: any) => p.id === `p2-${mode}`).name, 'Manas');
+      const merged = await jsonApi(`/v1/people/p1-${mode}/merge`, { method: 'POST', body: JSON.stringify({ from: [`p2-${mode}`] }) });
+      assert.equal(merged.status, 200, JSON.stringify(merged.body));
+      list = (await jsonApi('/v1/people')).body;
+      assert.equal(p1().name, 'Manas', 'a merge keeps the name');
+      assert.deepEqual(new Set(p1().assetIds), new Set([a.id, b.id, c.id]));
+      assert.equal(list.people.some((p: any) => p.id === `p2-${mode}`), false);
+
+      assert.equal((await jsonApi(`/v1/people/p1-${mode}/remove`, { method: 'POST', body: JSON.stringify({ assetIds: [c.id] }) })).status, 200);
+      list = (await jsonApi('/v1/people')).body;
+      assert.deepEqual(new Set(p1().assetIds), new Set([a.id, b.id]));
+      // The indexer cannot put a face back into a person it was taken out of.
+      await jsonApi('/v1/faces', { method: 'POST', body: JSON.stringify({ faces: [face(`fc-${mode}`, c.id, `p1-${mode}`)] }) });
+      const all = (await jsonApi('/v1/faces?limit=2000')).body.faces;
+      const fc = all.find((f: any) => f.id === `fc-${mode}`);
+      assert.deepEqual([fc.personId, fc.rejected], [null, `p1-${mode}`]);
+
+      // "This is someone else": the face moves to a new, named person.
+      const moved = await jsonApi(`/v1/people/p1-${mode}/remove`, { method: 'POST', body: JSON.stringify({ assetIds: [b.id], to: `p3-${mode}`, name: 'Bhumika' }) });
+      assert.equal(moved.status, 200, JSON.stringify(moved.body));
+      list = (await jsonApi('/v1/people')).body;
+      assert.deepEqual(p1().assetIds, [a.id]);
+      const p3 = list.people.find((p: any) => p.id === `p3-${mode}`);
+      assert.deepEqual([p3.name, p3.assetIds], ['Bhumika', [b.id]]);
+      assert.equal((await jsonApi(`/v1/people/p3-${mode}/remove`, { method: 'POST', body: JSON.stringify({ assetIds: [b.id], to: `p1-${mode}` }) })).status, 200);
+      list = (await jsonApi('/v1/people')).body;
+      assert.equal(p1().name, 'Manas', 'moving into an existing person keeps its name');
+      assert.equal((await jsonApi(`/v1/people/p1-${mode}/remove`, { method: 'POST', body: JSON.stringify({ assetIds: [a.id], to: `p1-${mode}` }) })).status, 400);
+
+      await jsonApi(`/v1/assets/${a.id}`, { method: 'DELETE' });
+      list = (await jsonApi('/v1/people')).body;
+      assert.deepEqual(p1().assetIds, [b.id], 'trashed photos are not listed');
+      assert.equal((await jsonApi('/v1/people/nobody', { method: 'PATCH', body: JSON.stringify({ name: 'x' }) })).status, 404);
+      assert.equal((await jsonApi('/v1/people/bad id!', { method: 'PATCH', body: JSON.stringify({ name: 'x' }) })).status, 400);
+      const bad = await jsonApi('/v1/faces', { method: 'POST', body: JSON.stringify({ faces: [{ ...face('x', 'not-an-asset', null) }] }) });
+      assert.equal(bad.status, 400);
+
+      // The indexer's working file round-trips (it runs on GitHub Actions and keeps its state here).
+      const state = Buffer.from(`sqlite-bytes-${mode}`.repeat(1000));
+      assert.equal((await api('/v1/faces/state', { method: 'PUT', body: state })).status, 200);
+      const back = await api('/v1/faces/state');
+      assert.equal(back.status, 200);
+      assert.deepEqual(Buffer.from(await back.arrayBuffer()), state);
+      assert.equal((await fetch(s.base + '/v1/faces/state')).status, 401, 'needs the token');
+    });
+
     test('a photo and its separately uploaded motion clip merge into one Live Photo', async () => {
       const clip = fakeFile(120_000);
       const { id: photo } = await backup(fakeFile(150_000));

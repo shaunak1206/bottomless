@@ -39,6 +39,32 @@ final class ImageLoader: @unchecked Sendable {
         return img
     }
 
+    /// A square picture of one face, with some room around it. Big faces come from the thumbnail; small ones need the
+    /// 2048 px preview to stay sharp.
+    func face(_ box: FaceBox) async -> UIImage? {
+        let key = "f:" + box.faceId
+        if let img = memory.object(forKey: key as NSString) { return img }
+        let source = box.w >= 0.3 ? await thumbnail(box.assetId) : await preview(box.assetId)
+        guard let source else { return nil }
+        let img = await Task.detached(priority: .userInitiated) { Self.crop(source, to: box, side: 240) }.value
+        keep(img, key)
+        return img
+    }
+
+    static func crop(_ img: UIImage, to box: FaceBox, side: CGFloat) -> UIImage {
+        let w = img.size.width, h = img.size.height
+        // A square 1.8× the face, centered on it and kept inside the photo.
+        let s = min(max(box.w * w, box.h * h) * 1.8, w, h)
+        let cx = (box.x + box.w / 2) * w, cy = (box.y + box.h / 2) * h
+        let ox = min(max(cx - s / 2, 0), w - s), oy = min(max(cy - s / 2, 0), h - s)
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: fmt).image { _ in
+            let k = side / s
+            img.draw(in: CGRect(x: -ox * k, y: -oy * k, width: w * k, height: h * k))
+        }
+    }
+
     /// A photo that has not been backed up yet (or is still on the phone).
     func local(_ localId: String, size: CGSize) async -> UIImage? {
         let key = "l:\(Int(size.width)):" + localId

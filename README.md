@@ -69,12 +69,34 @@ has seen and fixes the date and place once the matching one arrives, so parts ca
 is deleted after a verified extraction. Use a different `<account-name>` per Google account. Live and Motion Photos
 whose photo and clip landed in different zips are joined back into one Live Photo once both halves are in.
 
+## People
+
+Collections has a People row like Photos: tap someone to see every photo they are in, name them, merge two groups that
+are the same person ("Same Person As…"), or hide someone. In a photo's Info, "This Is Someone Else…" moves it to the
+right person (or a new one) and "Not <name>" takes it out.
+
+The phone has no public face recognition API, so the recognizing runs on GitHub Actions' free Linux runners, every 6
+hours, from a separate private repo (its secrets reach every photo, and anyone with write access to a repo can read
+its Actions secrets):
+```bash
+scripts/faces_cloud.sh deploy     # create/update shaunak1206/bottomless-faces from faces-runner/ and scripts/faces.py
+scripts/faces_cloud.sh run 4      # run now; 4 parallel index jobs for a big backlog (1 is the default)
+scripts/faces_cloud.sh status
+```
+`faces.py` downloads each photo's 2048 px preview, finds faces with InsightFace's SCRFD detector, embeds them with
+ArcFace (models from InsightFace's `buffalo_l` release, cached by Actions) and groups the embeddings. Only face boxes
+and the grouping go to D1; the embeddings live in `.faces/index.sqlite`, which the runner keeps in R2
+(`/v1/faces/state`) between runs. Each run only looks at photos it has not seen, so new photos backed up from the phone
+are sorted into People on the next run: faces join the person they look most like, and faces that match nobody form
+new people once three of them agree. Names, merges and corrections made in the app are never undone by a later run.
+It also runs on a Mac (`scripts/faces.py`, Core ML; `scripts/faces_agent.sh install` for every 30 minutes).
+
 ## Tests
 
 ```bash
-cd backend && npm test                       # 28 API tests (local Worker + S3 imitation, spending caps)
+cd backend && npm test                       # 32 API tests (local Worker + S3 imitation, spending caps, people)
 scripts/test_core.sh                         # app core end-to-end against a local Worker, R2 and S3 modes
-cd ios/Packages/BottomlessCore && swift test --skip IntegrationTests   # 17 unit tests
+cd ios/Packages/BottomlessCore && swift test --skip IntegrationTests   # 28 unit tests
 node scripts/smoke.mjs $(cat .secrets/api_url) .secrets/app_token      # live checks against the deployed API
 ```
 UI tests drive the app in the simulator (see `docs/screenshots/` for what they capture): library, viewer, favorite,

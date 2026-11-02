@@ -90,6 +90,7 @@ final class AppServices: @unchecked Sendable {
             try? await sync.pushAlbums(PhotoKitLibrary.userAlbums(), phoneAlbumsComplete: full)
         }
         try? await sync.pullAlbums()
+        try? await sync.pullPeople()
         if deadline.map({ Date() < $0 }) ?? true {
             await sync.fillCache(recentCount: settings.offlinePreviewCount)
         }

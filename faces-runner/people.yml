@@ -1,0 +1,95 @@
+name: People
+# Finds and groups the faces in Bottomless photos (scripts/faces.py) on GitHub's free Linux runners, every 6 hours.
+# Its working file (embeddings, what it has looked at) lives in the Worker's R2 bucket between runs (/v1/faces/state).
+# For a big backlog: Actions → People → Run workflow → shards 4 (four jobs index a quarter each, then one groups).
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: Parallel index jobs
+        type: choice
+        options: ['1', '2', '3', '4']
+        default: '1'
+
+concurrency:
+  group: people
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BOTTOMLESS_API_URL: ${{ secrets.BOTTOMLESS_API_URL }}
+  BOTTOMLESS_TOKEN: ${{ secrets.BOTTOMLESS_TOKEN }}
+  SHARDS: ${{ inputs.shards || '1' }}
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(format('[{0}]', inputs.shards == '4' && '1,2,3,4' || inputs.shards == '3' && '1,2,3' || inputs.shards == '2' && '1,2' || '1')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Models (InsightFace buffalo_l)
+        uses: actions/cache@v4
+        with:
+          path: .faces/models
+          key: buffalo_l-det_10g-w600k_r50
+      - name: Download models if not cached
+        run: |
+          if [ ! -f .faces/models/w600k_r50.onnx ]; then
+            mkdir -p .faces/models && cd .faces/models
+            curl -fsSL -o b.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+            unzip -q -j b.zip '*det_10g.onnx' '*w600k_r50.onnx' && rm b.zip
+          fi
+      - name: Face index from R2
+        run: scripts/state.sh get
+      - name: Index (and group, when not split)
+        run: |
+          if [ "$SHARDS" = "1" ]; then python scripts/faces.py run; else python scripts/faces.py index --shard ${{ matrix.shard }}/$SHARDS; fi
+      - name: Save the face index
+        if: always() && env.SHARDS == '1'
+        run: scripts/state.sh put
+      - name: Hand this shard to the group job
+        if: always() && env.SHARDS != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: .faces/index.sqlite
+          retention-days: 1
+
+  group:
+    needs: index
+    if: always() && (inputs.shards || '1') != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Face index from R2
+        run: scripts/state.sh get
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+      - run: python scripts/faces.py merge shards/*/index.sqlite
+      - name: Save the merged index before grouping
+        run: scripts/state.sh put
+      - run: python scripts/faces.py group
+      - name: Save the face index
+        if: always()
+        run: scripts/state.sh put

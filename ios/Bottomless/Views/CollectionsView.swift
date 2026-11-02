@@ -2,7 +2,7 @@ import SwiftUI
 import MapKit
 import BottomlessCore
 
-/// Favorites, Recently Added, Videos, Live Photos, Screenshots and Places, plus the albums made on this iPhone.
+/// Favorites, Recently Added, Videos, Live Photos, Screenshots and Places, then People and the albums made on this iPhone.
 /// Everything here is built from what is stored in the cloud, so it stays after photos are freed up from the phone.
 struct CollectionsView: View {
     @Environment(AppModel.self) private var model
@@ -11,6 +11,8 @@ struct CollectionsView: View {
     enum Route: Hashable {
         case collection(Catalog.Collection)
         case album(id: String, title: String)
+        case person(id: String)
+        case allPeople
     }
 
     var body: some View {
@@ -26,6 +28,7 @@ struct CollectionsView: View {
                         .accessibilityIdentifier("collection-\(c.rawValue)")
                     }
                 }
+                PeopleSection()
                 HStack(alignment: .firstTextBaseline) {
                     Text("Albums").font(.title2.weight(.bold))
                     Spacer()
@@ -59,6 +62,10 @@ struct CollectionsView: View {
                     AssetGridView(title: c.title, emptyText: c.emptyText) { $0.assets(in: c) }
                 case .album(let id, let title):
                     AssetGridView(title: title, emptyText: "This album is empty.") { $0.albumAssets(id) }
+                case .person(let id):
+                    PersonView(personId: id)
+                case .allPeople:
+                    AllPeopleView()
                 }
             }
         }

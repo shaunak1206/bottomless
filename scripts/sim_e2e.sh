@@ -1,6 +1,6 @@
 #!/bin/zsh
 # End-to-end in the iOS simulator: local backend, fresh app install, sample camera roll, UI tests, screenshots.
-#   scripts/sim_e2e.sh [simulator-udid]
+#   scripts/sim_e2e.sh [simulator-udid]       (ONLY=test8_PeopleNamedAndOpened runs just that UI test)
 set -euo pipefail
 ROOT=${0:A:h:h}
 UDID=${1:-$(xcrun simctl list devices available | grep -m1 -E "iPhone" | grep -oE '[0-9A-F-]{36}')}
@@ -46,6 +46,18 @@ done
 echo "   cloud items before: $before, after: $ready (pending $pending)"
 LIVE_ID=$(node $ROOT/scripts/seed_live.mjs http://127.0.0.1:$PORT $DATA/token $(ls $MEDIA/*.jpg | head -1) $(ls $MEDIA/*.mov | head -1))
 echo "   cloud-only Live Photo $LIVE_ID"
+# People as the Mac face indexer would upload them: two people in the sample photos.
+node -e '
+const [base, tokenFile] = process.argv.slice(1);
+const h = { Authorization: "Bearer " + require("fs").readFileSync(tokenFile, "utf8").trim(), "Content-Type": "application/json" };
+(async () => {
+  const ids = (await (await fetch(base + "/v1/changes?limit=1000", { headers: h })).json()).assets
+    .filter((a) => a.status === "ready" && a.kind === "photo").map((a) => a.id);
+  const face = (i, p) => ({ id: "sim-f" + i, assetId: ids[i], personId: p, x: 0.3, y: 0.25, w: 0.4, h: 0.4, score: 0.95 });
+  const faces = [0, 1, 2, 3].map((i) => face(i, "sim-p1")).concat([4, 5, 6].map((i) => face(i, "sim-p2")));
+  const r = await fetch(base + "/v1/faces", { method: "POST", headers: h, body: JSON.stringify({ faces }) });
+  console.log("   people seeded: HTTP " + r.status);
+})();' http://127.0.0.1:$PORT $DATA/token
 xcrun simctl terminate $UDID $BUNDLE 2>/dev/null || true
 
 echo "== UI tests"
@@ -53,4 +65,4 @@ mkdir -p $SHOTS
 TEST_RUNNER_BOTTOMLESS_API_BASE=http://127.0.0.1:$PORT TEST_RUNNER_BOTTOMLESS_TOKEN=$TOKEN TEST_RUNNER_SCREENSHOT_DIR=$SHOTS \
   TEST_RUNNER_LIVE_ID=$LIVE_ID \
   xcodebuild test -project Bottomless.xcodeproj -scheme Bottomless -destination "platform=iOS Simulator,id=$UDID" \
-  -derivedDataPath build/sim 2>&1 | grep -E "Test Case.*(passed|failed)|error:|\*\* TEST"
+  -derivedDataPath build/sim ${ONLY:+-only-testing:BottomlessUITests/BottomlessUITests/$ONLY} 2>&1 | grep -E "Test Case.*(passed|failed)|error:|\*\* TEST"

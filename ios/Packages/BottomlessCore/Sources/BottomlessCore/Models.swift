@@ -138,6 +138,34 @@ public struct RemoteAlbum: Codable, Sendable, Equatable, Identifiable {
 
 public struct AlbumsPage: Codable, Sendable { public var version: Int64; public var albums: [RemoteAlbum] }
 
+/// Where a face is in a photo, as fractions of the photo's width and height (from the top left).
+public struct FaceBox: Codable, Sendable, Equatable, Hashable {
+    public var faceId: String
+    public var assetId: String
+    public var x: Double
+    public var y: Double
+    public var w: Double
+    public var h: Double
+    public init(faceId: String, assetId: String, x: Double, y: Double, w: Double, h: Double) {
+        self.faceId = faceId; self.assetId = assetId; self.x = x; self.y = y; self.w = w; self.h = h
+    }
+}
+
+/// Someone the Mac's face indexer (scripts/faces.py) found: the photos they are in, newest first, and the face to show.
+public struct RemotePerson: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var name: String?
+    public var hidden: Bool
+    public var cover: FaceBox?
+    public var assetIds: [String]
+    public init(id: String, name: String?, hidden: Bool, cover: FaceBox?, assetIds: [String]) {
+        self.id = id; self.name = name; self.hidden = hidden; self.cover = cover; self.assetIds = assetIds
+    }
+}
+
+/// `unchanged` is true (and `people` absent) when nothing moved since the version the phone sent.
+public struct PeoplePage: Codable, Sendable { public var version: Int64; public var unchanged: Bool?; public var people: [RemotePerson]? }
+
 public struct SharedLink: Codable, Sendable, Identifiable, Equatable {
     public var token: String
     public var url: URL

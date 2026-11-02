@@ -17,6 +17,7 @@ final class AppModel {
     var favorites: [CatalogAsset] = []
     var collections: [Catalog.Collection: Catalog.GroupSummary] = [:]
     var albums: [Catalog.GroupSummary] = []
+    var people: [Catalog.PersonSummary] = []
     var trashed: [CatalogAsset] = []
     var backupCounts: [BackupState: Int] = [:]
     var stats: ServerStats?
@@ -115,6 +116,7 @@ final class AppModel {
         }
         collections = snap.collections
         albums = snap.albums
+        if people != snap.people { people = snap.people }
         trashed = snap.trashed
         if backupCounts != snap.backupCounts { backupCounts = snap.backupCounts }
         backupPausedUntil = snap.pausedUntil.flatMap { $0 > Date() ? $0 : nil }
@@ -322,6 +324,7 @@ struct LibrarySnapshot: Sendable {
     let pausedUntil: Date?
     let collections: [Catalog.Collection: Catalog.GroupSummary]
     let albums: [Catalog.GroupSummary]
+    let people: [Catalog.PersonSummary]
 
     init(_ s: AppServices, keepDays: Int) {
         items = s.catalog.libraryItems()
@@ -335,6 +338,7 @@ struct LibrarySnapshot: Sendable {
         pausedUntil = s.engine.pausedUntil
         collections = s.catalog.collectionSummaries()
         albums = s.catalog.albumSummaries()
+        people = s.catalog.peopleSummaries()
     }
 }
 
